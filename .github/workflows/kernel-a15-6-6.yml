@@ -1,0 +1,52 @@
+name: Kernel Build - A34x (6.6)
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: "android_kernel_samsung_a34x branch/tag/commit to build"
+        required: true
+        type: string
+        default: "main"
+      modules_branch:
+        description: "mediatek_common (kernel-6.6) branch/tag/commit override (leave empty to use the submodule's pinned commit)"
+        required: false
+        type: string
+        default: ""
+      version:
+        description: "Custom version name (optional)"
+        required: false
+        type: string
+        default: ""
+  workflow_call:
+    inputs:
+      kernel_branch:
+        required: true
+        type: string
+      modules_branch:
+        required: false
+        type: string
+        default: ""
+      version:
+        required: false
+        type: string
+        default: ""
+      called_from_main:
+        description: "Whether this was called from main.yml (internal use)"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  build-a34x:
+    name: "a34x-6.6-${{ inputs.kernel_branch }}"
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+    with:
+      kernel_branch: ${{ inputs.kernel_branch }}
+      modules_branch: ${{ inputs.modules_branch || '' }}
+      version: ${{ inputs.version || '' }}
