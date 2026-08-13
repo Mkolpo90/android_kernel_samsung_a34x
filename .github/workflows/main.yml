@@ -1,0 +1,145 @@
+# ========================================
+# A34x Kernel Build - Main Entry Point
+# ========================================
+# Single entry point: builds android_kernel_samsung_a34x from source with
+# no patches applied, and optionally publishes the result as a GitHub Release.
+# ========================================
+
+name: Build A34x Kernel
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      # ==================== Source selection ====================
+      kernel_branch:
+        description: "android_kernel_samsung_a34x branch/tag/commit to build"
+        type: string
+        default: "main"
+        required: true
+      modules_branch:
+        description: "mediatek_common (kernel-6.6) branch/tag/commit override (leave empty to use the submodule's pinned commit)"
+        type: string
+        default: ""
+        required: false
+      version:
+        description: "Custom version name (optional)"
+        type: string
+        default: ""
+        required: false
+
+      # ==================== Release config ====================
+      release_type:
+        description: "Release type"
+        type: choice
+        options:
+          - Actions
+          - Pre-Release
+          - Release
+        default: Actions
+      change_log:
+        description: "Change log (optional, multi-line)"
+        type: string
+        default: ""
+        required: false
+
+jobs:
+  # ==================== Build ====================
+  build:
+    uses: ./.github/workflows/kernel-a15-6-6.yml
+    secrets: inherit
+    with:
+      kernel_branch: ${{ inputs.kernel_branch }}
+      modules_branch: ${{ inputs.modules_branch }}
+      version: ${{ inputs.version }}
+      called_from_main: true
+
+  # ==================== Release ====================
+  # Only runs when release_type != Actions
+  release:
+    if: ${{ always() && !cancelled() && needs.build.result == 'success' && inputs.release_type != 'Actions' }}
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+      actions: write
+    env:
+      REPO_OWNER: ${{ github.repository_owner }}
+      REPO_NAME: ${{ github.event.repository.name }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v8
+        with:
+          path: ./downloaded-artifacts
+
+      - name: Generate release tag
+        run: |
+          DATE_TAG=$(date -u +'%Y%m%d-%H%M%S')
+          NEW_TAG="a34x-${{ inputs.kernel_branch }}-${DATE_TAG}"
+          echo "NEW_TAG=$NEW_TAG" >> $GITHUB_ENV
+          echo "Generated tag: $NEW_TAG"
+
+      - name: Generate release notes
+        run: |
+          cat > release_body.md << EOF
+          ## A34x Kernel Build
+
+          **Source branch**: \`${{ inputs.kernel_branch }}\`
+          **mediatek_common ref**: \`${{ inputs.modules_branch || '(submodule default)' }}\`
+          **Unmodified build**: no SUSFS, KernelSU, BBG, or any other patch applied
+
+          ### Sources
+          - https://github.com/Mkolpo90/android_kernel_samsung_a34x (branch: \`${{ inputs.kernel_branch }}\`)
+          - https://github.com/Mkolpo90/android_kernel_samsung_mediatek_common
+
+          ### Change Log
+          \`\`\`
+          ${{ inputs.change_log }}
+          \`\`\`
+          EOF
+
+      - name: Create GitHub Release
+        run: |
+          PRERELEASE_FLAG=""
+          if [ "${{ inputs.release_type }}" == "Pre-Release" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          gh release create "$NEW_TAG" \
+            --title "A34x Kernel: ${{ inputs.kernel_branch }}" \
+            --notes-file release_body.md \
+            --target "$GITHUB_SHA" \
+            $PRERELEASE_FLAG
+
+      - name: Upload kernel artifact to release
+        run: |
+          for file in ./downloaded-artifacts/*/*; do
+            [ -d "$file" ] && continue
+            echo "Uploading $file..."
+            gh release upload "$NEW_TAG" "$file"
+          done
+
+      - name: Publish release (draft -> published)
+        run: |
+          gh release edit --draft=false "$NEW_TAG"
+
+      - name: Build summary
+        run: |
+          echo "## Release created" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag**: $NEW_TAG" >> $GITHUB_STEP_SUMMARY
+          echo "- **Type**: ${{ inputs.release_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Link**: https://github.com/$REPO_OWNER/$REPO_NAME/releases/tag/$NEW_TAG" >> $GITHUB_STEP_SUMMARY
