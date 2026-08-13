@@ -1,0 +1,169 @@
+# ========================================
+# A34x Kernel Build Workflow
+# ========================================
+# Builds the Samsung A34x (mt6877) MediaTek kernel from source, with no
+# patches applied (no SUSFS, no KernelSU, no BBG, etc). Called by
+# kernel-a15-6-6.yml, or triggered directly via workflow_dispatch.
+# ========================================
+
+name: Kernel Build Flow
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  workflow_call:
+    inputs:
+      kernel_branch:
+        description: "Branch/tag/commit of android_kernel_samsung_a34x to build"
+        required: true
+        type: string
+      modules_branch:
+        description: "Branch/tag/commit of android_kernel_samsung_mediatek_common (kernel-6.6 submodule). Empty = whatever the a34x repo's submodule pointer already references"
+        required: false
+        type: string
+        default: ""
+      version:
+        description: "Custom version/build name (optional)"
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  build-kernel:
+    name: "a34x-${{ inputs.kernel_branch }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+
+    steps:
+      - name: Build info summary
+        run: |
+          echo "========================================"
+          echo "       A34x Kernel Build Summary"
+          echo "========================================"
+          echo "a34x repo branch    : ${{ inputs.kernel_branch }}"
+          echo "mediatek_common ref : ${{ inputs.modules_branch || '(submodule default)' }}"
+          echo "Custom version      : ${{ inputs.version || '(none)' }}"
+          echo "========================================"
+
+      - name: Free disk space
+        uses: endersonmenezes/free-disk-space@v3
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+          remove_swap: true
+          remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* *llvm* mysql* dotnet-sdk-*"
+          remove_packages_one_command: true
+          remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
+          rm_cmd: "rmz"
+          rmz_version: "3.1.1"
+          testing: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves bc kmod cpio rsync unzip
+
+      - name: Configure ccache
+        run: |
+          ccache --version
+          ccache --max-size=2G
+          ccache --set-config=compression=true
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+
+      - name: Restore ccache cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.ccache
+          key: a34x-ccache-${{ inputs.kernel_branch }}-${{ github.sha }}
+          restore-keys: |
+            a34x-ccache-${{ inputs.kernel_branch }}-
+            a34x-ccache-
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "BuildBot"
+          git config --global user.email "BuildA34xKernel@gmail.com"
+
+      # ==================== Checkout kernel source ====================
+      # Top-level repo carries the kernel-6.6 submodule (-> mediatek_common)
+      # and vendor/mediatek/kernel_modules. Cloned unmodified, no patches.
+      - name: Checkout android_kernel_samsung_a34x
+        run: |
+          git clone --recurse-submodules --shallow-submodules \
+            -b "${{ inputs.kernel_branch }}" --depth 1 \
+            https://github.com/Mkolpo90/android_kernel_samsung_a34x.git kernel
+
+      - name: Pin mediatek_common submodule to a specific ref (optional)
+        if: inputs.modules_branch != ''
+        working-directory: kernel/kernel-6.6
+        run: |
+          echo "Fetching and checking out mediatek_common ref: ${{ inputs.modules_branch }}"
+          git fetch --depth 1 origin "${{ inputs.modules_branch }}"
+          git checkout FETCH_HEAD
+
+      - name: Show checked-out revisions
+        working-directory: kernel
+        run: |
+          echo "android_kernel_samsung_a34x:"
+          git log -1 --oneline
+          echo ""
+          echo "kernel-6.6 (mediatek_common):"
+          git -C kernel-6.6 log -1 --oneline
+
+      # ==================== Custom version tag (optional, no source edits) ====================
+      # Only touches an env var consumed by the build; does not modify any
+      # tracked source file, so the tree stays byte-for-byte what upstream ships.
+      - name: Set custom version env
+        if: inputs.version != ''
+        run: |
+          echo "KBUILD_BUILD_VERSION_TAG=${{ inputs.version }}" >> $GITHUB_ENV
+
+      # ==================== Build ====================
+      # Runs the repo's own build_kernel.sh as-is, no modifications.
+      - name: Build kernel
+        uses: nick-fields/retry@v4
+        with:
+          timeout_minutes: 75
+          max_attempts: 2
+          retry_on: timeout
+          command: |
+            cd kernel
+            chmod +x build_kernel.sh
+            ./build_kernel.sh
+
+      # ==================== Collect build output ====================
+      - name: Locate build output
+        run: |
+          mkdir -p out-artifacts
+          DIST_DIR="kernel/out/target/product/a34x/obj/KLEAF_OBJ/dist"
+          if [ -d "$DIST_DIR" ]; then
+            cp -r "$DIST_DIR"/. out-artifacts/
+          else
+            echo "::warning::Expected dist dir not found at $DIST_DIR, searching for Image/*.ko instead"
+            find kernel/out -maxdepth 6 -type f \( -name "Image" -o -name "*.ko" -o -name "boot.img" -o -name "dtbo.img" \) -exec cp {} out-artifacts/ \; 2>/dev/null || true
+          fi
+          ls -la out-artifacts/
+
+      - name: Package build output
+        run: |
+          ZIP_NAME="android_kernel_samsung_a34x-${{ inputs.kernel_branch }}.zip"
+          cd out-artifacts
+          zip -r "../$ZIP_NAME" .
+          cd ..
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: a34x-kernel-${{ inputs.kernel_branch }}
+          path: ${{ env.ZIP_NAME }}
+          compression-level: 0
